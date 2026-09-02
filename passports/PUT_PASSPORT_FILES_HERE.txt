@@ -1,0 +1,2 @@
+Put your passport scans (PDF, JPG, PNG, TIFF) in this folder, then double-click run_mac.command or run_windows.bat.
+Sub-folders are fine. This text file is ignored.

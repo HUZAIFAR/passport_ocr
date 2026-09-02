@@ -1,0 +1,173 @@
+=====================================================================
+   PASSPORT NAME EXTRACTOR  -  FEATURES / WHAT IT DOES
+=====================================================================
+
+IN ONE SENTENCE
+---------------
+You put a folder of passport scans in; you get an Excel sheet out with
+every person's Last Name, First Name, Passport Number, issuing country
+and Expiry Date, with expired passports coloured red and passports
+that expire within 7 months coloured yellow.
+
+
+WHAT GOES IN
+------------
+  * PDF files (one passport per file, or several passports in one PDF -
+    each page becomes its own row)
+  * Photos and scans: JPG, JPEG, PNG, TIFF, BMP, WEBP
+  * A whole folder at once, including sub-folders, or a single file
+  * Scans of the passport data page: flatbed scans, photocopies scanned
+    to PDF, phone photos. The two lines of <<<< text at the bottom of the
+    page must be in the picture.
+  * Passports from any country. Tested with Indian, UK and US layouts;
+    the machine-readable zone works the same way on all passports.
+
+
+WHAT COMES OUT
+--------------
+  passport_names.xlsx  (Excel) and  passport_names.csv  (same data, plain)
+
+  Columns:
+    File                        which scan the row came from
+    Page                        page number inside a PDF
+    Last Name (Surname)         from the machine-readable zone (MRZ)
+    First Name                  first given name, from the MRZ
+    Middle / Other Given Names  any further given names, from the MRZ
+    Passport Number             from the MRZ, validated by its check digit
+    Passport From               issuing country, e.g. "India (IND)"
+    Expiry Date                 from the MRZ, validated by its check digit
+    Validity                    EXPIRED / EXPIRES SOON (<7 months) / OK / UNKNOWN
+    Months Left                 months until expiry (negative = expired)
+    Name Confidence             high / medium / low / none (see below)
+    Passport No. Check          how the number was verified, or why to check it
+    Expiry Check                how the date was verified, or why to check it
+    Read From                   where the values came from
+    Notes                       plain-English reason whenever something is flagged
+    MRZ line                    the raw machine-readable name line, for checking
+
+  A second sheet, "Legend", explains every colour and status.
+  Columns have filters and the header row stays visible when scrolling.
+
+
+COLOURS IN THE EXCEL FILE
+-------------------------
+  Whole row RED       the passport has EXPIRED (expiry date before today)
+  Whole row YELLOW    less than 7 months of validity left
+  Blue name cells     name from the MRZ only (printed fields not readable);
+                      it passed the check digits - quick glance recommended
+  Orange cells        that value needs checking against the scan; the Notes
+                      column says exactly why
+  Grey name cells     nothing could be read (blank page, photo only, bad scan)
+  Bold Notes          the row has something to look at
+
+
+HOW IT READS A PASSPORT
+-----------------------
+  1. Finds the two machine-readable lines (MRZ) at the bottom of the page.
+       Line 1:  P<INDSHARMA<<RAHUL<KUMAR<<<<<<<<<<<<<<<<<<<<
+       Line 2:  J8369854<4IND9001014M2601017<<<<<<<<<<<<<<<8
+     Surname, given names, passport number, issuing country and expiry
+     date all come from these lines.
+  2. Checks the MRZ's own check digits (built into every passport) for
+     the passport number and the expiry date.
+  3. Reads the MRZ several times at different magnifications and lets the
+     readings vote, so a stray misread letter does not win.
+  4. Reads the printed fields on the page as an independent cross-check:
+     Surname, Given Name(s), Passport No., Date of Expiry.
+       - agree with the MRZ        -> "high" / "verified"
+       - disagree                  -> row flagged, both readings in Notes
+       - printed field unreadable  -> "medium", MRZ value used, quick glance
+  5. Works out validity from the expiry date and today's date.
+  6. Writes Excel + CSV and prints a summary (how many high, how many to
+     review, how many expired / expiring soon).
+
+
+THINGS IT HANDLES AUTOMATICALLY
+-------------------------------
+  * Sideways and upside-down scans (rotated and re-read)
+  * Slightly skewed scans, low-resolution scans, photocopies, phone photos
+  * Passport placed anywhere on the scanner glass (top or bottom of page)
+  * PDFs that already contain text (previously OCR'd) - read directly
+  * Several passports in one PDF - one row per passport
+  * Blank pages / photo-only pages - flagged grey, never silently skipped
+  * A file that cannot be opened - written as an ERROR row, the batch continues
+  * Hyphenated and multi-word surnames (OKONKWO SMITH, GARCIA LOPEZ)
+  * Apostrophes and accents, spelled the way the MRZ spells them
+    (D'SOUZA -> DSOUZA, MULLER -> MUELLER)
+  * Very long names that the MRZ cuts off - completed from the printed
+    field when the printed field confirms the beginning
+  * People with a single name only (no given name) - flagged so you decide
+    how to record them
+  * Filler characters (<) misread as letters - detected and removed
+  * A passport number misread by one look-alike character (0/O, 1/I, 5/S,
+    8/B, 2/Z) - repaired only when the check digit AND the printed number agree
+  * A missing MRZ (cropped scan) - falls back to the printed fields and
+    flags the row
+  * Any issuing-country code turned into a readable name (about 250 codes,
+    including special ones such as D for Germany or XXA for stateless)
+
+
+ACCURACY RULES  (the whole design is built around these)
+-------------------------------------------------------
+  * A value is only marked "high" / "verified" when two independent
+    readings agree (MRZ + check digit, or MRZ + printed field).
+  * A value that could not be confirmed is never silently accepted: it is
+    marked medium (looks clean) or flagged orange (needs a look).
+  * When the MRZ and the printed field disagree, the row is flagged and
+    both readings are shown. For the expiry date the EARLIER date is used,
+    so an expired passport can never be hidden by a misread.
+  * Names come from the MRZ, not from the printed fields.
+  * Tested against 23 synthetic passports (Indian/UK/US layouts, poor
+    scans, rotations, phone photo, missing MRZ, single name, long name,
+    boundary dates) with a checker that fails if any wrong value appears
+    in an unflagged row. Zero failures on both OCR engines.
+
+
+VALIDITY RULES
+--------------
+  "Today" is the day you run the program.
+  EXPIRED          expiry date is before today                       -> RED
+  EXPIRES SOON     expiry date is less than 7 months from today      -> YELLOW
+                   (a passport expiring today counts as EXPIRES SOON)
+  OK               7 months or more of validity left
+  UNKNOWN - check  the expiry date could not be read                 -> orange cell
+  Months Left      exact figure, so you can sort by it
+
+
+RUNS COMPLETELY OFFLINE
+-----------------------
+  * Nothing is uploaded anywhere. No account, no API, no cost per passport.
+  * Internet is needed only once, during setup, to download the Python add-ons.
+  * Text recognition: Apple's built-in Vision engine on Mac; the free
+    Tesseract engine on Windows (chosen automatically).
+  * About 1 to 3 seconds per passport. 200 passports = a few minutes.
+
+
+HOW YOU USE IT
+--------------
+  1. One-time setup: double-click  setup_mac.command  or  setup_windows.bat
+  2. Drop the scans into the  passports  folder
+  3. Double-click  run_mac.command  or  run_windows.bat  -> Excel opens
+  Step-by-step instructions with links:  README - MAC.txt  /  README - WINDOWS.txt
+  Six FAKE sample passports are included in  sample_passports  to try it out.
+
+
+FOR THE TECHNICALLY MINDED (optional command-line options)
+----------------------------------------------------------
+  python3 passport_ocr.py FOLDER -o results.xlsx
+      --engine tesseract      force the Tesseract engine (Mac default is Apple Vision)
+      --today 2027-01-15      judge validity as of another date (planning ahead)
+      --verbose               print the text the OCR saw for every flagged row
+      --dpi 400               render PDF pages at higher resolution (slower)
+
+
+WHAT IT DOES NOT DO
+-------------------
+  * It does not check whether a passport is genuine - it reads what is printed.
+  * It does not read date of birth, sex or nationality into the sheet
+    (they are in the MRZ and could be added if needed).
+  * It does not read handwriting or visa/stamp pages.
+  * National ID cards are only partly supported (names yes, number/expiry
+    may need checking).
+  * Names are written as the MRZ writes them: capitals, no accents,
+    hyphens shown as spaces, apostrophes dropped.

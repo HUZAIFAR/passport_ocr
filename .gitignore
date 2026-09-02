@@ -1,0 +1,21 @@
+# Local Python environment created by the setup scripts
+.venv/
+__pycache__/
+*.pyc
+
+# Output files - they contain personal data from real passports. Never commit.
+passport_names.*
+*.xlsx
+*.csv
+
+# Passport scans - never commit. Only the placeholder note is kept.
+passports/*
+!passports/PUT_PASSPORT_FILES_HERE.txt
+sample_passports/
+
+# Packaged zip for sending to people
+*.zip
+
+# OS junk
+.DS_Store
+Thumbs.db

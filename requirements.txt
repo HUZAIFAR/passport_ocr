@@ -1,0 +1,6 @@
+# Python packages needed by passport_ocr.py  (install with:  pip install -r requirements.txt)
+pymupdf>=1.23          # opens PDFs and turns pages into images
+pillow>=9.0            # image handling
+openpyxl>=3.1          # writes the Excel file
+pytesseract>=0.3.10    # talks to the Tesseract OCR program (Windows / Linux / Mac)
+pyobjc-framework-Vision>=9.0 ; sys_platform == "darwin"   # Apple's built-in OCR - Mac only, skipped automatically elsewhere
