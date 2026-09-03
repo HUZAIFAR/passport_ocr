@@ -308,7 +308,8 @@ def mrz_like(text: str) -> bool:
         return True
     # Tesseract sometimes reads the trailing fillers as lowercase junk ("<<<<ceeee§e<<");
     # still accept the line if it clearly starts like an MRZ header ("P<IND...").
-    return bool(re.match(r"^[PVIAC][A-Z<][A-Z]{3}[A-Z<]", t.strip()))
+    # Spaces are stripped first: Tesseract often writes "P< INDBHATT<<...".
+    return bool(re.match(r"^[PVIAC][A-Z<][A-Z]{3}[A-Z<]", re.sub(r"\s+", "", t)))
 
 
 # The trailing "<<<<<<<<" fillers are sometimes read as letters ("KKKKK", "SSSSKKEKKK", "K K", "X").
@@ -322,8 +323,21 @@ def _is_garbage(tok: str) -> bool:
     return bool(GARBAGE_RE.search(tok)) or (len(tok) >= 2 and set(tok) <= set("KSCEX"))
 
 
+# A long run of the MRZ's "<<<<" padding is sometimes read as a run of letters that gets glued
+# straight onto the end of a real name ("SADIA" + "CCCCCCCCCCCC"). No real name repeats the same
+# letter three times in a row, so a run like that marks where the padding began.
+FILLER_RUN_RE = re.compile(r"([KSCEXILYV])\1{2,}")
+
+
+def cut_filler_run(tok: str) -> str:
+    m = FILLER_RUN_RE.search(tok)
+    if m and m.start() >= 2:          # keep at least two letters of the real name
+        return tok[:m.start()]
+    return tok
+
+
 def strip_filler_garbage(name: str, surname: bool = False) -> str:
-    toks = name.split()
+    toks = [t for t in (cut_filler_run(t) for t in name.split()) if t]
     stripped = 0
     while len(toks) > 1:
         t = toks[-1]
@@ -579,13 +593,19 @@ def mrz_candidate_texts(boxes: List[Box]) -> List[str]:
 def read_mrz_from_texts(texts: List[str]) -> Optional[dict]:
     """Best MRZ name-line interpretation of the given strings, with line-2 information attached."""
     best = None
+    parsed = []
     for t in texts:
         if not mrz_like(t):
             continue
         r = parse_mrz_name_line(mrz_clean(t))
-        if r and mrz_quality(r) >= 0 and (best is None or mrz_quality(r) > mrz_quality(best)):
-            best = r
+        if r and mrz_quality(r) >= 0:
+            parsed.append(r)
+            if best is None or mrz_quality(r) > mrz_quality(best):
+                best = r
     if best:
+        # Keep the other plausible spellings of the name: they are how we notice that the end of
+        # a name was read differently on different lines of the same page.
+        best["name_alts"] = [(r["surname"], r["given"]) for r in parsed if r is not best]
         for t in texts:
             c = mrz_clean(t)
             if MRZ_LINE2_RE.match(c):
@@ -1018,12 +1038,22 @@ def combine(res: Result, mrz: Optional[dict], lab: dict, printed_exp: Optional[S
     # A single-letter given name that the printed field could not confirm is more likely a
     # misread '<' filler than a real initial - make a human decide.
     unconfirmed_initial = not given_verified and any(len(t) == 1 and t in "KSCEX" for t in given.split())
+    # Two magnifications read the end of the name differently and the printed field could not
+    # settle it (see pick_mrz) - the last letter or two of the name are uncertain.
+    disputed_tail = mrz.get("disputed_tail") and not (given_verified and verified >= 1)
 
     # ---- confidence ----
     if unconfirmed_initial:
         res.confidence = "low"
         res.method = "MRZ"
         notes.append("a single-letter given name in the MRZ may be a misread filler - check the scan")
+    elif disputed_tail:
+        res.confidence = "low"
+        res.method = "MRZ"
+        alt = mrz.get("disputed_alt")
+        notes.append("the end of the name was read two ways"
+                     + (f" (also read as '{alt}')" if alt else "")
+                     + " - the last letter may be a misread filler, check the spelling")
     elif disputed:
         res.confidence = "low"
         res.method = "MRZ (printed fields disagree)"
@@ -1070,6 +1100,59 @@ def mrz_region(boxes: List[Box], size):
     return (max(0, x0 - 0.05 * W), max(0, y0 - 2.5 * h), min(W, x1 + 0.05 * W), min(H, y1 + 2.5 * h)), h
 
 
+def content_box(img: Image.Image) -> Optional[tuple]:
+    """Where the ink actually is on the page, as fractions (x0, y0, x1, y1).
+
+    A passport photocopied onto the middle of an A4 sheet leaves big white margins; the MRZ
+    characters then come out far too small to read. This finds the non-white area so it can be
+    re-rendered on its own at high resolution.
+    """
+    g = ImageOps.grayscale(img)
+    w = 300                                   # tiny working copy - this only locates the region
+    h = max(1, round(g.height * w / g.width))
+    small = g.resize((w, h), Image.BILINEAR)
+    ink = small.point(lambda v: 255 if v < 232 else 0)
+    bb = ink.getbbox()
+    if not bb:
+        return None                           # completely blank page
+    x0, y0, x1, y1 = bb
+    pad_x, pad_y = 0.02, 0.02                 # a little slack around the edges
+    return (max(0.0, x0 / w - pad_x), max(0.0, y0 / h - pad_y),
+            min(1.0, x1 / w + pad_x), min(1.0, y1 / h + pad_y))
+
+
+def box_area(box: tuple) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def image_rerender(img: Image.Image):
+    """Fallback 'zoom in' for photos: crop the region and enlarge it.
+
+    No new detail exists in a photo, but OCR engines read best at a certain character size,
+    so enlarging a small passport still helps.
+    """
+    def render(box: tuple, target_px: int = 2600) -> Optional[Image.Image]:
+        W, H = img.size
+        crop = img.crop((int(box[0] * W), int(box[1] * H), int(box[2] * W), int(box[3] * H)))
+        if min(crop.size) < 40:
+            return None
+        s = min(4.0, max(1.0, target_px / crop.width))
+        return _resize(crop, s) if s > 1.01 else crop
+    return render
+
+
+CONF_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
+
+
+def result_rank(r: Result) -> tuple:
+    """How good a reading is, for choosing between two attempts at the same page."""
+    return (CONF_RANK.get(r.confidence, 0),
+            1 if (r.expiry and r.expiry_status not in REVIEW_STATUSES) else 0,
+            1 if r.expiry else 0,
+            1 if (r.passport_no and r.passport_no_status not in REVIEW_STATUSES) else 0,
+            0 if r.needs_review else 1)
+
+
 def _resize(im: Image.Image, s: float) -> Image.Image:
     return im.resize((max(1, int(im.width * s)), max(1, int(im.height * s))), Image.LANCZOS)
 
@@ -1113,6 +1196,27 @@ def pick_mrz(readings: List[dict]) -> Optional[dict]:
             top, n = Counter(r[key] for r in good).most_common(1)[0]
             if n >= 2 and best[key] != top:
                 best[key] = top
+    # One reading may take the '<' padding for a letter and glue it onto the name (ROHAN ->
+    # ROHANK) while another reads the padding correctly. From the MRZ alone there is no way to
+    # know whether that last letter is real - plenty of names genuinely end in K, S or X - so we
+    # do NOT silently shorten it. We record the disagreement instead, and the row gets flagged
+    # for a human unless the printed name field settles it.
+    spellings = {"surname": set(), "given": set()}
+    for r in readings:
+        spellings["surname"].add(r["surname"])
+        spellings["given"].add(r["given"])
+        for s, g in r.get("name_alts", []):
+            spellings["surname"].add(s)
+            spellings["given"].add(g)
+    for key in ("surname", "given"):
+        chosen = best[key]
+        for other in spellings[key]:
+            if not other or other == chosen or not chosen.startswith(other):
+                continue
+            if len(norm(other)) >= 3 and set(chosen[len(other):].replace(" ", "")) <= FILLER_LOOKALIKES:
+                best["disputed_tail"] = True
+                best["disputed_alt"] = other
+                break
     best["single_name"] = best.get("single_name") or (best["given"] == "" and len(best["raw"]) >= 40)
     exp_ok = Counter(r["expiry"] for r in readings if r.get("expiry") and r.get("expiry_ok"))
     exp_any = Counter(r["expiry"] for r in readings if r.get("expiry"))
@@ -1131,7 +1235,8 @@ def pick_mrz(readings: List[dict]) -> Optional[dict]:
     return best
 
 
-def process_image(img: Image.Image, engine, file: str, page: int, verbose: bool) -> Result:
+def process_image(img: Image.Image, engine, file: str, page: int, verbose: bool,
+                  rerender=None, zoomed: bool = False) -> Result:
     res = Result(file=file, page=page)
     if img.mode not in ("RGB", "L"):
         img = img.convert("RGB")
@@ -1166,6 +1271,22 @@ def process_image(img: Image.Image, engine, file: str, page: int, verbose: bool)
 
     # 4. Combine
     res = combine(res, mrz, lab, printed_exp, printed_no, angle)
+
+    # 5. Is the passport only a small part of the page (e.g. photocopied onto A4)?
+    #    Then everything above worked on text far too small. Re-render just that region at high
+    #    resolution and read it again, keeping whichever attempt came out better.
+    if rerender is not None and not zoomed and (mrz is None or res.needs_review):
+        cbox = content_box(img)
+        if cbox and box_area(cbox) < 0.72:
+            crop = rerender(cbox)
+            if crop is not None:
+                alt = process_image(crop, engine, file, page, verbose, rerender=None, zoomed=True)
+                if alt.method != "NONE" and result_rank(alt) > result_rank(res):
+                    pct = round(box_area(cbox) * 100)
+                    alt.notes = "; ".join(n for n in (
+                        f"passport covered only about {pct}% of the page - re-read zoomed in", alt.notes) if n)
+                    return alt
+
     if res.method == "NONE":
         letters = sum(sum(ch.isalpha() for ch in b.text) for b in boxes)
         res.notes = ("Could not read a name - check the scan manually" if letters > 20
@@ -1180,19 +1301,44 @@ def process_image(img: Image.Image, engine, file: str, page: int, verbose: bool)
     return res
 
 
+def _cap_size(img: Image.Image, limit: int = 4000) -> Image.Image:
+    """Keep images to a workable size (a 600 dpi A4 scan renders enormous)."""
+    if max(img.size) <= limit:
+        return img
+    s = limit / max(img.size)
+    return img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))), Image.LANCZOS)
+
+
+def pdf_rerender(page):
+    """Render one region of a PDF page on its own, at whatever resolution makes the text readable.
+
+    Unlike enlarging an already-rendered image, this goes back to the PDF, so a passport occupying
+    a small part of the sheet genuinely gains detail.
+    """
+    def render(box: tuple, target_px: int = 2600) -> Optional[Image.Image]:
+        r = page.rect
+        clip = fitz.Rect(r.x0 + box[0] * r.width, r.y0 + box[1] * r.height,
+                         r.x0 + box[2] * r.width, r.y0 + box[3] * r.height)
+        if clip.width <= 1 or clip.height <= 1:
+            return None
+        dpi = int(min(1200, max(300, target_px / (clip.width / 72.0))))
+        try:
+            pix = page.get_pixmap(dpi=dpi, clip=clip, colorspace=fitz.csRGB, alpha=False)
+        except Exception:  # noqa: BLE001 - fall back to no zoom rather than failing the file
+            return None
+        return _cap_size(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+    return render
+
+
 def pdf_pages(path: Path, dpi: int):
-    """Yield (page_number, PIL image, text_layer_lines) for each PDF page."""
+    """Yield (page_number, PIL image, text_layer_lines, rerender) for each PDF page."""
     doc = fitz.open(str(path))
     try:
         for i, page in enumerate(doc, start=1):
             text_lines = [ln for ln in page.get_text("text").splitlines() if ln.strip()]
             pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB, alpha=False)
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            # Very large pages (e.g. 600dpi scans stored as images) render huge; keep it sane.
-            if max(img.size) > 4000:
-                scale = 4000 / max(img.size)
-                img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
-            yield i, img, text_lines
+            img = _cap_size(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+            yield i, img, text_lines, pdf_rerender(page)
     finally:
         doc.close()
 
@@ -1201,7 +1347,7 @@ def process_file(path: Path, engine, dpi: int, verbose: bool) -> List[Result]:
     results: List[Result] = []
     ext = path.suffix.lower()
     if ext in PDF_EXTS:
-        for page_no, img, text_lines in pdf_pages(path, dpi):
+        for page_no, img, text_lines, rerender in pdf_pages(path, dpi):
             # Cheap win: the PDF already contains a text layer with the MRZ
             mrz = read_mrz_from_texts(text_lines) if text_lines else None
             if mrz and mrz["given"] and len(mrz["raw"]) >= 40:
@@ -1209,7 +1355,7 @@ def process_file(path: Path, engine, dpi: int, verbose: bool) -> List[Result]:
                 r.method = "MRZ (pdf text layer)"
                 results.append(r)
                 continue
-            results.append(process_image(img, engine, path.name, page_no, verbose))
+            results.append(process_image(img, engine, path.name, page_no, verbose, rerender=rerender))
     elif ext in IMAGE_EXTS:
         with Image.open(path) as im:
             im.load()
@@ -1217,7 +1363,8 @@ def process_file(path: Path, engine, dpi: int, verbose: bool) -> List[Result]:
                 im = ImageOps.exif_transpose(im)   # honour phone-camera rotation flags
             except Exception:  # noqa: BLE001
                 pass
-            results.append(process_image(im, engine, path.name, 1, verbose))
+            im = _cap_size(im.convert("RGB") if im.mode not in ("RGB", "L") else im)
+            results.append(process_image(im, engine, path.name, 1, verbose, rerender=image_rerender(im)))
     else:
         return []
 

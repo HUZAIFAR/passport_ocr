@@ -87,6 +87,12 @@ THINGS IT HANDLES AUTOMATICALLY
   * Sideways and upside-down scans (rotated and re-read)
   * Slightly skewed scans, low-resolution scans, photocopies, phone photos
   * Passport placed anywhere on the scanner glass (top or bottom of page)
+  * A passport that covers only PART of the sheet - the usual case where a
+    passport is photocopied onto the middle or a corner of an A4 page. The
+    program finds where the passport actually is on the paper and re-reads
+    just that area at high resolution, instead of giving up on a page that is
+    mostly blank. For PDFs it goes back to the original file for that area, so
+    it genuinely gains detail rather than just enlarging a blurry picture.
   * PDFs that already contain text (previously OCR'd) - read directly
   * Several passports in one PDF - one row per passport
   * Blank pages / photo-only pages - flagged grey, never silently skipped
@@ -98,7 +104,12 @@ THINGS IT HANDLES AUTOMATICALLY
     field when the printed field confirms the beginning
   * People with a single name only (no given name) - flagged so you decide
     how to record them
-  * Filler characters (<) misread as letters - detected and removed
+  * Filler characters (<) misread as letters - detected and removed, including
+    a run of them glued onto the end of a real name (SADIACCCCCCC -> SADIA)
+  * The same name coming out two ways at two zoom levels (ROHAN vs ROHANK):
+    the program will not guess which is right - plenty of names really do end
+    in K, S or X - so it shows one, names the other in the Notes, and flags
+    the row for a human
   * A passport number misread by one look-alike character (0/O, 1/I, 5/S,
     8/B, 2/Z) - repaired only when the check digit AND the printed number agree
   * A missing MRZ (cropped scan) - falls back to the printed fields and
@@ -117,9 +128,10 @@ ACCURACY RULES  (the whole design is built around these)
     both readings are shown. For the expiry date the EARLIER date is used,
     so an expired passport can never be hidden by a misread.
   * Names come from the MRZ, not from the printed fields.
-  * Tested against 23 synthetic passports (Indian/UK/US layouts, poor
+  * Tested against 30 synthetic passports (Indian/UK/US layouts, poor
     scans, rotations, phone photo, missing MRZ, single name, long name,
-    boundary dates) with a checker that fails if any wrong value appears
+    boundary dates, and passports covering only 20-30% of an A4 sheet at
+    150/200/300/600 dpi) with a checker that fails if any wrong value appears
     in an unflagged row. Zero failures on both OCR engines.
 
 
@@ -159,6 +171,23 @@ FOR THE TECHNICALLY MINDED (optional command-line options)
       --today 2027-01-15      judge validity as of another date (planning ahead)
       --verbose               print the text the OCR saw for every flagged row
       --dpi 400               render PDF pages at higher resolution (slower)
+
+
+THE ONE REAL LIMIT: HOW BIG THE TEXT IS
+---------------------------------------
+  Everything depends on the two <<<< lines at the bottom of the passport page.
+  Those characters need to be roughly 10 pixels tall or more in the scan.
+
+  As a rule of thumb, that means the passport should fill at least about a
+  quarter of the width of the page, scanned at 300 dpi. Combining "very small
+  on the page" with "low resolution" or "blurry photo" is what defeats it: a
+  passport shrunk into a corner of a blurry phone photo can end up with MRZ
+  text only 4 pixels tall, where the information simply is not in the file any
+  more. No program can recover that, and no amount of enlarging helps.
+
+  When that happens the row is flagged (grey name cells, "not readable"), never
+  guessed. The fix is to rescan: put the passport alone on the glass, or scan
+  the sheet at 300-600 dpi.
 
 
 WHAT IT DOES NOT DO

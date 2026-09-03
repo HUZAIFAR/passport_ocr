@@ -163,6 +163,12 @@ IF SOMETHING GOES WRONG
         -> The  passports  folder was renamed or moved. It must be
            called  passports  and sit next to run_windows.bat.
 
+  Grey name cells / "not readable"
+        -> The passport was too small in the scan for the <<<< lines to be
+           read. Rescan with the passport filling more of the page, or scan
+           the sheet at 300-600 dpi. As a guide the passport should fill at
+           least about a quarter of the page width.
+
   Many orange cells
         -> The scans are poor or cut off. Rescan at 300 dpi and make
            sure the two lines of  <<<<  text at the bottom of the
