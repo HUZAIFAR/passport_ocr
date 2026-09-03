@@ -7,7 +7,8 @@ WHAT IT DOES
 You put passport scans (PDF or photos) into a folder. The program reads
 every one and creates an Excel sheet with:
 
-    Last Name | First Name | Passport Number | Passport From | Expiry Date
+    Last Name | First Name | Passport Number | Passport From |
+    Nationality | Expiry Date
 
 Expired passports are coloured RED. Passports with less than 7 months of
 validity left are coloured YELLOW. Anything the program is not 100% sure
@@ -134,6 +135,14 @@ READING THE EXCEL FILE
 
   Tip: click the small filter arrow on "Validity" or "Name Confidence"
   to show only the problem rows.
+
+  Dates: the expiry date comes from the machine-readable lines at the
+  bottom of the passport, which write dates unambiguously. Only when
+  those cannot be read does the program fall back to the printed date,
+  and it then reads it the way the issuing country writes it (India,
+  Pakistan, UK, France, Australia: day/month/year - USA: month/day/year).
+  If the country cannot be worked out, the row is flagged instead of
+  guessed, with both possible dates in the Notes.
 
   A second sheet called "Legend" inside the Excel file repeats this.
 

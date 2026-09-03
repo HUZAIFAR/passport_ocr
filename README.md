@@ -73,8 +73,9 @@ Want to test it first? Copy the fake passports from **`sample_passports`** into
 | File / Page | Which scan the row came from. A PDF with several passports gives several rows. |
 | Last Name (Surname) / First Name / Middle | From the MRZ. Hyphens appear as spaces and apostrophes are dropped, exactly as the MRZ encodes them (`OKONKWO SMITH`, `DSOUZA`). |
 | Passport Number | From MRZ line 2, validated by its check digit and the printed number. |
-| Passport From | Issuing country, e.g. `India (IND)`. |
-| Expiry Date | From MRZ line 2, validated by its check digit and the printed date. |
+| Passport From | Country that issued the passport, e.g. `India (IND)`. |
+| Nationality | The holder's nationality, from MRZ line 2 (or the printed field). Not always the same as the issuing country. |
+| Expiry Date | From MRZ line 2, validated by its check digit and the printed date. The MRZ spells dates unambiguously (YYMMDD); a printed date used on its own is read with the issuing country's day/month order — day-first everywhere except the USA, and flagged rather than guessed if the country is unknown. |
 | Validity | `EXPIRED`, `EXPIRES SOON (<7 months)`, `OK` or `UNKNOWN - check`. |
 | Months Left | Months from today until expiry (negative = expired). |
 | Name Confidence | `high` = MRZ and printed name fields agree. `medium` = MRZ only, looks clean. `low` / `none` = check by hand. |

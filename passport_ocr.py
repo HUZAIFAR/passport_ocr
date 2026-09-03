@@ -114,6 +114,7 @@ class Result:
     passport_no: str = ""
     country: str = ""                 # 3-letter code from the MRZ
     issuing_country: str = ""         # readable, e.g. "India (IND)"
+    nationality: str = ""             # holder's nationality, MRZ line 2 or the printed field
     expiry: Optional[date] = None
     validity: str = "UNKNOWN - check"
     months_left: Optional[float] = None
@@ -404,7 +405,7 @@ def parse_mrz_name_line(clean: str) -> Optional[dict]:
         truncated = doc != "" and len(clean) == 44 and clean[-1] != "<"
         return {"surname": surname, "given": given, "country": country, "doc": doc, "raw": clean,
                 "name_digits": sum(ch.isdigit() for ch in names), "line2": "", "checks": 0,
-                "expiry": None, "expiry_ok": False, "truncated": truncated,
+                "expiry": None, "expiry_ok": False, "truncated": truncated, "nationality": "",
                 "passport_no": "", "passport_no_ok": False, "passport_no_alts": [],
                 "single_name": given_raw.strip("<") == "" and len(clean) >= 40,
                 "weak_split": weak_split}
@@ -438,6 +439,15 @@ def line2_checks_passed(line2: str) -> int:
     if len(line2) < 28:
         return 0
     return int(_check_ok(line2[0:9], line2[9])) + int(_check_ok(line2[13:19], line2[19])) + int(_check_ok(line2[21:27], line2[27]))
+
+
+def mrz_nationality(line2: str) -> str:
+    """Nationality code from MRZ line 2, positions 10-12. This is the holder's nationality,
+    which is not always the same as the country that issued the passport (line 1)."""
+    if len(line2) < 13:
+        return ""
+    code = line2[10:13].translate(DIGIT_TO_LETTER)
+    return code if code.isalpha() else ""
 
 
 def mrz_expiry(line2: str):
@@ -613,6 +623,7 @@ def read_mrz_from_texts(texts: List[str]) -> Optional[dict]:
                 best["checks"] = line2_checks_passed(best["line2"])
                 best["expiry"], best["expiry_ok"] = mrz_expiry(best["line2"])
                 best["passport_no"], best["passport_no_ok"], best["passport_no_alts"] = mrz_passport_no(best["line2"])
+                best["nationality"] = mrz_nationality(best["line2"])
                 break
     return best
 
@@ -696,17 +707,72 @@ def value_below(label: Box, boxes: List[Box]) -> Optional[str]:
     return None
 
 
+def boxes_above(label: Box, boxes: List[Box]) -> List[Box]:
+    """Boxes printed directly above a label, nearest first."""
+    cands = []
+    for b in boxes:
+        if b is label:
+            continue
+        above = b.y1 <= label.cy and (label.y0 - b.y1) < 3.0 * label.h
+        x_overlap = b.x0 < label.x1 + 0.5 * label.w and b.x1 > label.x0 - 0.5 * label.w
+        if above and x_overlap:
+            cands.append(b)
+    cands.sort(key=lambda b: (-b.y1, abs(b.x0 - label.x0)))
+    return cands
+
+
 def find_by_labels(boxes: List[Box]) -> dict:
     out = {"surname": "", "given": ""}
+    given_label = None
     for key, label_re in (("surname", SURNAME_LABEL_RE), ("given", GIVEN_LABEL_RE)):
         for b in boxes:
             if not label_re.search(b.text):
                 continue
+            if key == "given":
+                given_label = b
             v = value_after_label(b, label_re) or value_below(b, boxes)
             if v:
                 out[key] = v
                 break
+    # The word "Surname" is small print and OCR sometimes misses it entirely. On every passport
+    # data page the surname sits directly above the given names, so use that when we found the
+    # "Given Names" label but no surname label.
+    if not out["surname"] and out["given"] and given_label is not None:
+        for c in boxes_above(given_label, boxes):
+            if re.search(r"[\d<]", c.text) or SURNAME_LABEL_RE.search(c.text):
+                continue
+            v = clean_name(c.text)
+            if valid_name(v):
+                out["surname"] = v
+                break
     return out
+
+
+NATIONALITY_LABEL_RE = re.compile(r"\bnationalit|\bnacionalidad|\bnazionalit", re.I)
+
+
+def valid_nationality(s: str) -> bool:
+    return bool(s) and 3 <= len(s) <= 40 and not NATIONALITY_LABEL_RE.search(s)
+
+
+def find_printed_nationality(boxes: List[Box]) -> str:
+    """The nationality printed under/after the 'Nationality' label ("INDIAN", "BRITISH CITIZEN")."""
+    for b in boxes:
+        m = NATIONALITY_LABEL_RE.search(b.text)
+        if not m:
+            continue
+        rest = re.sub(r"[/:()\[\]\d]", " ", b.text[m.end():])
+        rest = re.sub(r"\b(nationalit[ée]?|nacionalidad|nazionalita)\b", " ", rest, flags=re.I)
+        v = clean_name(rest)
+        if valid_nationality(v):
+            return v
+        for c in boxes_below(b, boxes):
+            if re.search(r"[\d<]", c.text):
+                continue
+            v = clean_name(c.text)
+            if valid_nationality(v):
+                return v
+    return ""
 
 
 # --- printed dates ("01/01/2026", "04 JUL 2032", "01 JAN /JAN 30", "2026-01-01") ---
@@ -738,32 +804,85 @@ def _full_year(y: str) -> int:
     return 2000 + y if 2000 + y <= TODAY.year + 15 else 1900 + y
 
 
-def dates_in_text(text: str) -> List[Set[date]]:
-    """Every date found in `text`, in reading order. Each is a SET of interpretations because
-    "01/02/2026" may be day/month or month/day."""
+# Which way round a country prints a NUMERIC date. "05/01/2027" is 5 January in India and
+# 1 May in the United States, so the issuing country decides. Day-first is the world norm;
+# the USA is the notable month-first exception. Countries not listed here are treated as
+# unknown: the date is then flagged rather than guessed.
+DAY_FIRST = {
+    "IND", "PAK", "GBR", "AUS", "FRA", "NZL", "IRL", "ZAF", "BGD", "LKA", "NPL", "MYS", "SGP",
+    "IDN", "THA", "VNM", "PHL", "ARE", "SAU", "QAT", "KWT", "BHR", "OMN", "JOR", "LBN", "EGY",
+    "NGA", "KEN", "TZA", "UGA", "GHA", "ZWE", "MUS", "DEU", "D", "ITA", "ESP", "PRT", "NLD",
+    "BEL", "CHE", "AUT", "GRC", "POL", "CZE", "SVK", "HUN", "ROU", "BGR", "HRV", "SRB", "UKR",
+    "RUS", "TUR", "BRA", "ARG", "CHL", "COL", "PER", "MEX", "ISR", "MAR", "TUN", "DZA", "AFG",
+    "IRN", "IRQ", "MMR", "KHM", "FJI", "PNG", "JAM", "TTO", "GUY", "MLT", "CYP", "DNK", "NOR",
+    "FIN", "ISL", "LUX", "EST", "LVA", "LTU", "SVN", "ALB", "MKD", "BIH", "MDA", "GEO", "ARM",
+    "AZE", "KAZ", "UZB", "BLR", "SDN", "ETH", "SEN", "CIV", "CMR", "COD", "AGO", "MOZ", "ZMB",
+    "BWA", "NAM", "MWI", "RWA", "BDI", "SOM", "YEM", "SYR", "LBY", "BRB", "BHS", "BLZ", "SUR",
+}
+MONTH_FIRST = {"USA"}
+# Canada, Japan, China, Korea and Sweden print year-first or a textual month; their numeric
+# forms are not reliably day-first, so they stay "unknown" and get flagged when ambiguous.
+
+
+def printed_date_order(country: str) -> Optional[str]:
+    """'DMY', 'MDY', or None when we should not assume."""
+    c = (country or "").upper()
+    if c in MONTH_FIRST:
+        return "MDY"
+    if c in DAY_FIRST:
+        return "DMY"
+    return None
+
+
+def dates_in_text(text: str) -> List[dict]:
+    """Every date found in `text`, in reading order.
+
+    A numeric date is returned with BOTH readings kept apart - 'dmy' (day first) and 'mdy'
+    (month first) - plus 'opts', the set of everything it could mean. Textual and ISO dates are
+    unambiguous, so all three agree.
+    """
     t = text.translate(DATE_DIGIT_FIX)
     found = []
+
+    def add(pos, dmy, mdy):
+        opts = {x for x in (dmy, mdy) if x}
+        if opts:
+            found.append((pos, {"opts": opts, "dmy": dmy, "mdy": mdy}))
+
     for m in DATE_ISO_RE.finditer(t):
         d = _mkdate(int(m[1]), int(m[2]), int(m[3]))
-        if d:
-            found.append((m.start(), {d}))
+        add(m.start(), d, d)
     for m in DATE_NUM_RE.finditer(t):
         a, b, y = int(m[1]), int(m[2]), int(m[3])
-        s = {x for x in (_mkdate(y, b, a), _mkdate(y, a, b)) if x}
-        if s:
-            found.append((m.start(), s))
+        add(m.start(), _mkdate(y, b, a), _mkdate(y, a, b))
     for m in DATE_TXT_RE.finditer(t):
         tok = strip_accents(m[2]).upper()
         mon = MONTHS.get(tok) or MONTHS.get(tok[:3])
         if mon:
             d = _mkdate(_full_year(m[3]), mon, int(m[1]))
-            if d:
-                found.append((m.start(), {d}))
+            add(m.start(), d, d)
     return [s for _, s in sorted(found, key=lambda x: x[0])]
 
 
-def find_printed_expiry(boxes: List[Box]) -> Optional[Set[date]]:
-    """The date printed under/after the 'Date of Expiry' label, as a set of interpretations."""
+def resolve_printed_date(pd: dict, country: str):
+    """Turn one printed date into (date, how) using the issuing country's convention.
+
+    `how` is 'sure' when there was only ever one reading, 'assumed' when the country's
+    convention settled it, or 'ambiguous' when we could not tell - the caller then flags it.
+    """
+    opts = pd["opts"]
+    if len(opts) == 1:
+        return next(iter(opts)), "sure"
+    order = printed_date_order(country)
+    if order == "DMY" and pd["dmy"]:
+        return pd["dmy"], "assumed"
+    if order == "MDY" and pd["mdy"]:
+        return pd["mdy"], "assumed"
+    return min(opts), "ambiguous"      # earliest, so an expired passport can never hide
+
+
+def find_printed_expiry(boxes: List[Box]) -> Optional[dict]:
+    """The date printed under/after the 'Date of Expiry' label, with both readings kept."""
     for b in boxes:
         m = EXPIRY_LABEL_RE.search(b.text)
         if not m:
@@ -775,8 +894,29 @@ def find_printed_expiry(boxes: List[Box]) -> Optional[Set[date]]:
             for c in boxes_below(b, boxes):
                 cands += dates_in_text(c.text)
         if cands:
-            return max(cands, key=lambda s: max(s))
+            return max(cands, key=lambda pd: max(pd["opts"]))
     return None
+
+
+# When the MRZ cannot be read at all we still need to know which country's date convention
+# applies, so fall back to the country printed on the page.
+PRINTED_COUNTRY_HINTS = [
+    ("IND", re.compile(r"\b(republic of india|india|indian|bharat)\b", re.I)),
+    ("PAK", re.compile(r"\bpakistan|\bpakistani\b", re.I)),
+    ("GBR", re.compile(r"\b(united kingdom|great britain|british citizen|british)\b", re.I)),
+    ("USA", re.compile(r"\b(united states|u\.?\s?s\.?\s?a\.?|american)\b", re.I)),
+    ("CAN", re.compile(r"\b(canada|canadian|canadienne)\b", re.I)),
+    ("FRA", re.compile(r"\b(r[ée]publique fran[cç]aise|france|fran[cç]ais)", re.I)),
+    ("AUS", re.compile(r"\baustralian?\b", re.I)),
+]
+
+
+def printed_country(boxes: List[Box]) -> str:
+    text = " ".join(b.text for b in boxes)
+    for code, rx in PRINTED_COUNTRY_HINTS:
+        if rx.search(text):
+            return code
+    return ""
 
 
 def find_printed_passport_no(boxes: List[Box]) -> Optional[str]:
@@ -791,7 +931,9 @@ def find_printed_passport_no(boxes: List[Box]) -> Optional[str]:
             for c in boxes_below(b, boxes):
                 if "<" in c.text:                 # that's the MRZ, not the printed number
                     continue
-                hits = PASSPORT_NO_RE.findall(c.text.upper())
+                # "AB 1234567" is one number that OCR split at a space
+                joined = re.sub(r"\b([A-Z]{1,2})\s+(\d{5,9})\b", r"\1\2", c.text.upper())
+                hits = PASSPORT_NO_RE.findall(joined)
                 if hits:
                     break
         if hits:
@@ -899,18 +1041,26 @@ def trim_to_printed(mrz_name: str, printed: str) -> str:
     return s.strip() or mrz_name
 
 
-def attach_expiry(res: Result, mrz: Optional[dict], printed: Optional[Set[date]], notes: List[str]):
+def attach_expiry(res: Result, mrz: Optional[dict], printed: Optional[dict], notes: List[str],
+                  country: str = ""):
+    """Set the expiry date. The MRZ is the source of truth - it always spells the date
+    unambiguously as YYMMDD. The printed date is only a cross-check, and is the one that needs a
+    country convention to read (05/01/2027 is 5 January in India, 1 May in the USA)."""
     m_exp = mrz.get("expiry") if mrz else None
     m_ok = bool(mrz and mrz.get("expiry_ok"))
     if m_exp:
-        if printed is not None and m_exp in printed:
+        # Either printed reading matching the MRZ is corroboration enough; we output the MRZ date,
+        # so the day/month order of the printed text cannot change the answer here.
+        if printed is not None and m_exp in printed["opts"]:
             res.expiry = m_exp
             res.expiry_status = "verified (check digit + printed date)" if m_ok else "verified (printed date matches)"
         elif printed is not None:
-            p = min(printed)
+            p, how = resolve_printed_date(printed, country)
             res.expiry = min(m_exp, p)     # worst case, so an expired passport can never hide
             res.expiry_status = "conflict"
-            notes.append(f"EXPIRY DIFFERS: MRZ {m_exp:%d %b %Y} vs printed {p:%d %b %Y} - earlier date used, check the scan")
+            notes.append(f"EXPIRY DIFFERS: MRZ {m_exp:%d %b %Y} vs printed {p:%d %b %Y}"
+                         + (" (day/month order unclear)" if how == "ambiguous" else "")
+                         + " - earlier date used, check the scan")
         elif m_ok:
             res.expiry = m_exp
             res.expiry_status = "verified (check digit)"
@@ -919,9 +1069,20 @@ def attach_expiry(res: Result, mrz: Optional[dict], printed: Optional[Set[date]]
             res.expiry_status = "check digit failed"
             notes.append("expiry date read from MRZ but its check digit failed - verify")
     elif printed:
-        res.expiry = min(printed)
-        res.expiry_status = "printed only"
-        notes.append("expiry date taken from printed field only (MRZ line 2 not readable) - verify")
+        # No MRZ date, so the printed one is all we have and its day/month order matters.
+        res.expiry, how = resolve_printed_date(printed, country)
+        if how == "ambiguous":
+            res.expiry_status = "unknown"
+            both = " or ".join(f"{d:%d %b %Y}" for d in sorted(printed["opts"]))
+            notes.append(f"expiry date printed as digits that could mean {both} and the issuing "
+                         f"country is unknown, so the day/month order cannot be settled - "
+                         f"earlier date used, CHECK THE SCAN")
+        else:
+            res.expiry_status = "printed only"
+            order = "day/month/year" if printed_date_order(country) == "DMY" else "month/day/year"
+            notes.append("expiry date taken from printed field only (MRZ line 2 not readable)"
+                         + (f", read as {order} for {country}" if how == "assumed" else "")
+                         + " - verify")
     else:
         res.expiry_status = "unknown"
         notes.append("expiry date not readable")
@@ -970,8 +1131,9 @@ def attach_passport_no(res: Result, mrz: Optional[dict], printed: Optional[str],
         notes.append("passport number not readable")
 
 
-def combine(res: Result, mrz: Optional[dict], lab: dict, printed_exp: Optional[Set[date]],
-            printed_no: Optional[str], angle: int) -> Result:
+def combine(res: Result, mrz: Optional[dict], lab: dict, printed_exp: Optional[dict],
+            printed_no: Optional[str], angle: int, page_country: str = "",
+            printed_nat: str = "") -> Result:
     """Merge the MRZ reading (the source of the name, number and expiry) with the printed-field
     reading (the cross-check) into one row with a confidence."""
     notes = []
@@ -986,12 +1148,25 @@ def combine(res: Result, mrz: Optional[dict], lab: dict, printed_exp: Optional[S
             res.confidence = "low"
             notes.append("MRZ not readable; taken from printed Surname / Given Name fields - please verify")
         attach_passport_no(res, None, printed_no, notes)
-        attach_expiry(res, None, printed_exp, notes)
+        if page_country:
+            res.country = page_country
+            res.issuing_country = country_display(page_country)
+            notes.append("issuing country read from the printed page (MRZ not readable)")
+        if printed_nat:
+            res.nationality = printed_nat
+            notes.append("nationality read from the printed page (MRZ not readable)")
+        attach_expiry(res, None, printed_exp, notes, page_country)
         res.notes = "; ".join(notes)
         return res
 
     res.country = mrz["country"]
     res.issuing_country = country_display(mrz["country"])
+    nat = mrz.get("nationality") or ""
+    if nat:
+        res.nationality = country_display(nat)
+    elif printed_nat:
+        res.nationality = printed_nat
+        notes.append("nationality read from the printed page (MRZ line 2 not readable)")
     res.mrz_line = mrz["raw"]
     full = len(mrz["raw"]) == 44
     verified = 0
@@ -1081,7 +1256,7 @@ def combine(res: Result, mrz: Optional[dict], lab: dict, printed_exp: Optional[S
             notes.append("name read from MRZ only (printed name fields not readable) - spot-check")
 
     attach_passport_no(res, mrz, printed_no, notes)
-    attach_expiry(res, mrz, printed_exp, notes)
+    attach_expiry(res, mrz, printed_exp, notes, mrz["country"] or page_country)
     res.notes = "; ".join(notes)
     return res
 
@@ -1270,7 +1445,8 @@ def process_image(img: Image.Image, engine, file: str, page: int, verbose: bool,
     printed_no = find_printed_passport_no(boxes)
 
     # 4. Combine
-    res = combine(res, mrz, lab, printed_exp, printed_no, angle)
+    res = combine(res, mrz, lab, printed_exp, printed_no, angle, printed_country(boxes),
+                  find_printed_nationality(boxes))
 
     # 5. Is the passport only a small part of the page (e.g. photocopied onto A4)?
     #    Then everything above worked on text far too small. Re-render just that region at high
@@ -1392,6 +1568,7 @@ COLUMNS = [
     ("other_given_names", "Middle / Other Given Names"),
     ("passport_no", "Passport Number"),
     ("issuing_country", "Passport From"),
+    ("nationality", "Nationality"),
     ("expiry", "Expiry Date"),
     ("validity", "Validity"),
     ("months_left", "Months Left"),
@@ -1402,7 +1579,7 @@ COLUMNS = [
     ("notes", "Notes"),
     ("mrz_line", "MRZ line (for checking)"),
 ]
-COL_WIDTHS = [34, 6, 22, 16, 24, 16, 22, 13, 26, 11, 15, 34, 34, 30, 80, 48]
+COL_WIDTHS = [34, 6, 22, 16, 24, 16, 22, 22, 13, 26, 11, 15, 34, 34, 30, 80, 48]
 
 FILL_EXPIRED = "FF9999"        # red     - passport has expired
 FILL_SOON = "FFEB9C"           # yellow  - less than 7 months of validity
@@ -1501,7 +1678,15 @@ def write_xlsx(results: List[Result], path: Path) -> bool:
         ("Name Confidence: medium", "MRZ name looks clean (check digits pass) but the printed fields could not confirm it.", None),
         ("Name Confidence: low / none", "Please check the scan by hand.", None),
         ("Passport No. / Expiry Check: verified", "Value from the MRZ, confirmed by its check digit and/or the printed field.", None),
-        ("Passport From", "Issuing country from the MRZ (3-letter code in brackets).", None),
+        ("Passport From", "Country that issued the passport, from the MRZ (3-letter code in brackets).", None),
+        ("Nationality", "The holder's nationality. From the MRZ where readable, otherwise the printed "
+                        "field. It is not always the same as the issuing country.", None),
+        ("Expiry Date", "Always taken from the machine-readable lines when they can be read: those "
+                        "spell dates unambiguously (year-month-day). The printed date is only a "
+                        "cross-check. When the machine-readable lines are unreadable and the printed "
+                        "date is digits only, it is read using the issuing country's convention - "
+                        "day/month/year everywhere except the USA, which is month/day/year. If the "
+                        "country is unknown the date cannot be settled, so the row is flagged.", None),
         (f"Validity judged as of", TODAY.strftime("%d %b %Y"), None),
     ]
     for label, meaning, colour in legend:

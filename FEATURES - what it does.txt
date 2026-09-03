@@ -5,9 +5,9 @@
 IN ONE SENTENCE
 ---------------
 You put a folder of passport scans in; you get an Excel sheet out with
-every person's Last Name, First Name, Passport Number, issuing country
-and Expiry Date, with expired passports coloured red and passports
-that expire within 7 months coloured yellow.
+every person's Last Name, First Name, Passport Number, issuing country,
+Nationality and Expiry Date, with expired passports coloured red and
+passports that expire within 7 months coloured yellow.
 
 
 WHAT GOES IN
@@ -34,7 +34,9 @@ WHAT COMES OUT
     First Name                  first given name, from the MRZ
     Middle / Other Given Names  any further given names, from the MRZ
     Passport Number             from the MRZ, validated by its check digit
-    Passport From               issuing country, e.g. "India (IND)"
+    Passport From               country that issued it, e.g. "India (IND)"
+    Nationality                 the holder's nationality (not always the same
+                                as the issuing country)
     Expiry Date                 from the MRZ, validated by its check digit
     Validity                    EXPIRED / EXPIRES SOON (<7 months) / OK / UNKNOWN
     Months Left                 months until expiry (negative = expired)
@@ -63,13 +65,24 @@ COLOURS IN THE EXCEL FILE
 
 HOW IT READS A PASSPORT
 -----------------------
+  0. DATES: the machine-readable lines spell dates as year-month-day, with no
+     ambiguity, which is exactly why they are the primary source. The date
+     PRINTED on the page is a different matter: "05/01/2027" means 5 January
+     in India, Pakistan, the UK, France and Australia, but 1 May in the USA.
+     The printed date is therefore only ever used to cross-check, and when it
+     has to be used on its own (unreadable machine-readable lines) it is read
+     using the issuing country's convention - day/month/year everywhere except
+     the USA. If the country cannot be determined, the date is NOT guessed:
+     the row is flagged and the Notes column lists both possible dates.
+
   1. Finds the two machine-readable lines (MRZ) at the bottom of the page.
        Line 1:  P<INDSHARMA<<RAHUL<KUMAR<<<<<<<<<<<<<<<<<<<<
        Line 2:  J8369854<4IND9001014M2601017<<<<<<<<<<<<<<<8
      Surname, given names, passport number, issuing country and expiry
      date all come from these lines.
   2. Checks the MRZ's own check digits (built into every passport) for
-     the passport number and the expiry date.
+     the passport number and the expiry date. Reads the nationality from the
+     MRZ too, which is a separate field from the issuing country.
   3. Reads the MRZ several times at different magnifications and lets the
      readings vote, so a stray misread letter does not win.
   4. Reads the printed fields on the page as an independent cross-check:
@@ -116,6 +129,10 @@ THINGS IT HANDLES AUTOMATICALLY
     flags the row
   * Any issuing-country code turned into a readable name (about 250 codes,
     including special ones such as D for Germany or XXA for stateless)
+  * Printed dates in either day-first or month-first order, decided by the
+    issuing country (India, Pakistan, UK, France, Australia and most of the
+    world are day-first; the USA is month-first). Textual months
+    ("04 JUL 2032") and impossible readings ("25/12/2026") need no guessing.
 
 
 ACCURACY RULES  (the whole design is built around these)
@@ -193,8 +210,8 @@ THE ONE REAL LIMIT: HOW BIG THE TEXT IS
 WHAT IT DOES NOT DO
 -------------------
   * It does not check whether a passport is genuine - it reads what is printed.
-  * It does not read date of birth, sex or nationality into the sheet
-    (they are in the MRZ and could be added if needed).
+  * It does not read date of birth or sex into the sheet (both are in the
+    MRZ and could be added if needed).
   * It does not read handwriting or visa/stamp pages.
   * National ID cards are only partly supported (names yes, number/expiry
     may need checking).
