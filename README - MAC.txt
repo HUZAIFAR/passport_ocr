@@ -56,34 +56,58 @@ STEP 2 - PUT THE FOLDER ON YOUR DESKTOP
 =====================================================================
 STEP 3 - RUN THE SETUP             (about 2 minutes, only once)
 =====================================================================
+
+  >>> IF YOU RECEIVED THIS FOLDER BY WHATSAPP, EMAIL OR AIRDROP,
+  >>> USE METHOD B. IT ALWAYS WORKS AND TAKES 20 SECONDS.
+
+  ---------------------------------------------------------------
+  METHOD A - double-click
+  ---------------------------------------------------------------
   1. RIGHT-click  setup_mac.command  and choose  Open .
      (Right-click = click with two fingers on the trackpad, or hold
       the Control key while clicking.)
 
-  2. The Mac will probably refuse the first time with a message like
-     "cannot be opened because it is from an unidentified developer"
-     or "Apple could not verify ...". That is normal. Do this:
+  2. If the Mac says "cannot be opened because it is from an
+     unidentified developer" or "Apple could not verify ...":
         a. Click  Done  (or  OK ).
-        b. Click the Apple menu (top-left corner) > System Settings.
+        b. Apple menu (top-left) > System Settings.
         c. Click  Privacy & Security  in the left list, then scroll
            down on the right until you see a line about
            setup_mac.command with an  "Open Anyway"  button.
         d. Click  Open Anyway , confirm with your password or Touch ID,
            then click  Open  in the next box.
-        (Older Macs: right-click > Open, then click "Open" in the box.)
 
-  3. A black Terminal window opens. If the Mac asks
+  3. If instead it says  "setup_mac.command is damaged and can't be
+     opened. You should move it to the Trash"  -  the file is NOT
+     damaged and there will be NO "Open Anyway" button anywhere.
+     WhatsApp / Mail put a block on the file. Click  Cancel
+     (never "Move to Trash") and use METHOD B below.
+
+  4. A black Terminal window opens. If the Mac asks
      "Terminal would like to access files in your Desktop folder",
      click  OK / Allow .
 
-  4. The window installs a few things (you will see text scrolling).
+  5. The window installs a few things (you will see text scrolling).
      Wait until it says      Setup complete!      then press Enter.
 
-  Nothing happens when you double-click? Do it from Terminal instead:
-     - Press  Cmd + Space , type  Terminal , press Enter.
-     - Copy this whole line into the Terminal window and press Enter:
+  ---------------------------------------------------------------
+  METHOD B - one line in Terminal  (fixes the block, always works)
+  ---------------------------------------------------------------
+  1. Press  Cmd + Space , type  Terminal , press Enter.
+  2. Copy this WHOLE line, paste it into the Terminal window
+     (Cmd + V), and press Enter:
 
-          cd ~/Desktop/passport_ocr && bash setup_mac.command
+          cd ~/Desktop/passport_ocr && xattr -cr . && chmod +x *.command && bash setup_mac.command
+
+     (If the Mac asks to access your Desktop folder, click OK.)
+  3. Wait until it says  Setup complete!  then press Enter.
+
+  That command removes the download block and makes the files
+  runnable. After it, double-clicking works normally too.
+
+  It says "no such file or directory"?  The folder is not on your
+  Desktop, or it is not called  passport_ocr . Put it on the Desktop
+  (Step 2) and try again.
 
 
 =====================================================================
@@ -99,8 +123,10 @@ STEP 4 - ADD THE PASSPORTS
 STEP 5 - RUN IT
 =====================================================================
   1. RIGHT-click  run_mac.command  and choose  Open .
-     (The first time, the Mac may block it - use the same
-      "Open Anyway" steps as in Step 3.)
+     (Blocked, or you used Method B in Step 3? Then run it the same
+      way instead - Terminal, paste this line, press Enter:
+
+          cd ~/Desktop/passport_ocr && bash run_mac.command      )
   2. A black window shows one line per passport as it works.
      It takes about 1 to 3 seconds per passport.
   3. When it is finished, Excel opens the results file by itself.
@@ -162,7 +188,15 @@ IF SOMETHING GOES WRONG
 
   "cannot be opened because it is from an unidentified developer" /
   "Apple could not verify ..."
-        -> System Settings > Privacy & Security > Open Anyway. See Step 3.
+        -> System Settings > Privacy & Security > Open Anyway.
+           See Step 3, Method A.
+
+  "setup_mac.command is damaged and can't be opened.
+   You should move it to the Trash"
+        -> The file is fine. WhatsApp / Mail blocked it, and for this
+           message there is NO "Open Anyway" button anywhere.
+           Click Cancel (never "Move to Trash") and use Step 3,
+           Method B - the one Terminal line clears the block.
 
   "Could not write passport_names.xlsx"
         -> The file is open in Excel. Close it and run again.
